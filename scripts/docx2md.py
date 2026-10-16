@@ -7,7 +7,8 @@
 
 输出:
     同目录下同名 .md 文件；被引用的图片提取到 <文件名>.assets/media/，
-    并在 <文件名>.assets/preview/ 生成缩略图（仅当本机有 macOS 的 sips 时）。
+    并尽力在 <文件名>.assets/preview/ 生成缩略图（可选：Pillow / macOS sips / ImageMagick，
+    任一可用即可；都没有则跳过，不影响转换）。
 
 实现:
     直接把 .docx 当作 ZIP 解包，解析 word/document.xml、word/_rels/document.xml.rels、
@@ -329,26 +330,77 @@ def iter_blocks(body):
 
 # ---------------- 转换与预览 ----------------
 
-def make_previews(ctx: Context):
-    sips = shutil.which("sips")
-    if not sips:
-        return 0
+def _is_imagemagick(exe: str) -> bool:
+    """确认这个 convert 是 ImageMagick，而不是 Windows 自带的 convert.exe。"""
+    try:
+        r = subprocess.run([exe, "-version"], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, check=False)
+    except OSError:
+        return False
+    return b"ImageMagick" in (r.stdout or b"")
+
+
+def _thumb_backends() -> list[str]:
+    """按优先级返回可用的缩略图后端——跨平台，任一可用即可；都不可用就跳过缩略图。
+
+    Pillow（跨平台，可选依赖）→ macOS sips → ImageMagick（IM7 `magick` / IM6 `convert`）。
+    缩略图只是给评审/人眼快速看图的便利，不参与正文转换，缺后端不影响 .docx → Markdown。
+    """
+    backends: list[str] = []
+    try:
+        import PIL.Image  # noqa: F401
+        backends.append("pillow")
+    except Exception:
+        pass
+    if shutil.which("sips"):
+        backends.append("sips")
+    if shutil.which("magick"):
+        backends.append("magick")
+    elif shutil.which("convert") and _is_imagemagick("convert"):
+        backends.append("convert")
+    return backends
+
+
+def _thumb_one(backend: str, src: Path, out: Path) -> bool:
+    """用指定后端把 src 缩到最长边 1280 的 JPEG；返回是否成功产出 out。"""
+    try:
+        if backend == "pillow":
+            from PIL import Image
+            im = Image.open(src).convert("RGB")
+            im.thumbnail((1280, 1280))
+            im.save(out, "JPEG", quality=80)
+        elif backend == "sips":
+            subprocess.run(
+                ["sips", "-Z", "1280", "-s", "format", "jpeg", "-s", "formatOptions", "80",
+                 str(src), "--out", str(out)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        elif backend == "magick":
+            subprocess.run(
+                ["magick", str(src), "-resize", "1280x1280>", "-quality", "80", str(out)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        else:  # convert（ImageMagick 6）
+            subprocess.run(
+                ["convert", str(src), "-resize", "1280x1280>", "-quality", "80", str(out)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        return False
+    return out.exists()
+
+
+def make_previews(ctx: Context) -> int:
+    backends = _thumb_backends()
+    if not backends:
+        return 0  # 没有任何可用后端：跳过缩略图，正常完成转换
     ctx.preview_dir.mkdir(parents=True, exist_ok=True)
     n = 0
     for f in ctx.extracted_files:
         if f.suffix.lower() not in PREVIEW_EXT:
             continue
         out = ctx.preview_dir / (f.stem + ".jpg")
-        try:
-            subprocess.run(
-                [sips, "-Z", "1280", "-s", "format", "jpeg", "-s", "formatOptions", "80",
-                 str(f), "--out", str(out)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-            )
-            if out.exists():
+        for backend in backends:
+            if _thumb_one(backend, f, out):
                 n += 1
-        except OSError:
-            pass
+                break
     return n
 
 

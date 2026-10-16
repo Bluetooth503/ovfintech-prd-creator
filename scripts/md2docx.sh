@@ -20,7 +20,7 @@ if [[ ! -f "$md" ]]; then
   exit 2
 fi
 if ! command -v pandoc >/dev/null 2>&1; then
-  echo "未找到 pandoc，请先安装（brew install pandoc）" >&2
+  echo "未找到 pandoc，请先安装 pandoc（macOS: brew install pandoc；Debian/Ubuntu: apt install pandoc；或见 https://pandoc.org/installing.html）" >&2
   exit 2
 fi
 
